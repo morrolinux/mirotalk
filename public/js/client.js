@@ -15,7 +15,7 @@
  * @license For commercial use or closed source, contact us at license.mirotalk@gmail.com or purchase directly from CodeCanyon
  * @license CodeCanyon: https://codecanyon.net/item/mirotalk-p2p-webrtc-realtime-video-conferences/38376661
  * @author  Miroslav Pejic - miroslav.pejic.85@gmail.com
- * @version 1.3.99
+ * @version 1.3.98
  *
  */
 
@@ -623,6 +623,9 @@ let isSpaceDown = false;
 
 // recording
 let mediaRecorder;
+let mediaRecorders = [];
+let multiTrackrecordedBlobs = [];
+let streamsDB = [];
 let recordedBlobs;
 let audioRecorder; // helpers.js
 let recScreenStream; // screen media to recording
@@ -2089,6 +2092,7 @@ async function handleOnTrack(peer_id, peers) {
                     remoteAudioStream && isAudioTrack
                         ? attachMediaStream(remoteAudioStream, event.streams[0])
                         : loadRemoteMediaStream(event.streams[0], peers, peer_id, kind);
+                    streamsDB[event.streams[0].getAudioTracks()[0].id] = peer_name;
                     break;
                 default:
                     break;
@@ -6773,6 +6777,11 @@ function getSupportedMimeTypes() {
 function startStreamRecording() {
     recordedBlobs = [];
 
+    // initialize empty dictionaries for each input stream 
+    multiTrackrecordedBlobs.forEach((blob) => {
+        blob = [];
+    });
+
     // Get supported MIME types and set options
     const supportedMimeTypes = getSupportedMimeTypes();
     console.log('MediaRecorder supported options', supportedMimeTypes);
@@ -6795,7 +6804,10 @@ function startStreamRecording() {
         const audioMixerTracks = audioMixerStreams.getTracks();
         console.log('Audio mixer tracks --->', audioMixerTracks);
 
-        isMobileDevice ? startMobileRecording(options, audioMixerTracks) : recordingOptions(options, audioMixerTracks);
+        startMultitrackAudioRecording(options, audioStreams);
+        
+        // STOCK
+        // isMobileDevice ? startMobileRecording(options, audioMixerTracks) : recordingOptions(options, audioMixerTracks);
     } catch (err) {
         handleRecordingError('Exception while creating MediaRecorder: ' + err);
     }
@@ -6828,6 +6840,29 @@ function recordingOptions(options, audioMixerTracks) {
             startDesktopRecording(options, audioMixerTracks);
         }
     });
+}
+
+
+function startMultitrackAudioRecording(options, streams) {
+    try {
+        const audioMediaStreams = [];
+
+        // Create a MediaStream object for each audio stream
+        streams.getTracks().filter((track) => track.kind === 'audio').forEach((audioStream) => {
+            audioMediaStreams.push(new MediaStream([audioStream]));
+        });
+
+        // Create a new MediaRecorder instance for every audio stream
+        audioMediaStreams.forEach((audioStream) => {
+            mediaRecorders.push(new MediaRecorder(audioStream, options));
+            // Call a function to handle the MediaRecorder
+            handleMediaRecorder(mediaRecorders[mediaRecorders.length - 1]);
+        });
+
+    } catch (err) {
+        // Handle any errors that occur during the recording setup
+        handleRecordingError('startMultitrackAudioRecording: Unable to record multi-track audio: ' + err, false);
+    }
 }
 
 /**
@@ -6992,6 +7027,8 @@ function handleMediaRecorder(mediaRecorder) {
  * @param {object} event of media recorder
  */
 function handleMediaRecorderStart(event) {
+    // initialize a new empty dict for each stream ID
+    multiTrackrecordedBlobs[event.srcElement.stream.getAudioTracks()[0].id] = [];
     startRecordingTimer();
     emitPeersAction('recStart');
     emitPeerStatus('rec', true);
@@ -7009,6 +7046,8 @@ function handleMediaRecorderStart(event) {
  */
 function handleMediaRecorderData(event) {
     console.log('MediaRecorder data: ', event);
+    // push each event's data into its respective blob (1 blob = 1 track)
+    if (event.data && event.data.size > 0) multiTrackrecordedBlobs[event.srcElement.stream.getAudioTracks()[0].id].push(event.data);
     if (event.data && event.data.size > 0) recordedBlobs.push(event.data);
 }
 
@@ -7031,7 +7070,10 @@ function handleMediaRecorderStop(event) {
         isRecScreenStream = false;
     }
     recordStreamBtn.style.setProperty('color', '#000');
-    downloadRecordedStream();
+    const stream_id = event.srcElement.stream.getAudioTracks()[0].id;
+    const peer_name = streamsDB[stream_id] ? streamsDB[stream_id] : myPeerName;
+    console.log("====Downloading Stream: ", peer_name, stream_id);
+    downloadRecordedStream(peer_name, stream_id);
     setTippy(recordStreamBtn, 'Start recording', placement);
     if (isMobileDevice) elemDisplay(swapCameraBtn, true, 'block');
     playSound('recStop');
@@ -7041,7 +7083,10 @@ function handleMediaRecorderStop(event) {
  * Stop recording
  */
 function stopStreamRecording() {
-    mediaRecorder.stop();
+    mediaRecorders.forEach((recorder) => {
+        recorder.stop();
+    });
+    // mediaRecorder.stop(); // TODO figure out what to do with this..
     audioRecorder.stopMixedAudioStream();
 }
 
@@ -7094,11 +7139,14 @@ function resumeRecording() {
 /**
  * Download recorded stream
  */
-function downloadRecordedStream() {
+function downloadRecordedStream(peer_name, stream_id) {
     try {
-        const type = recordedBlobs[0].type.includes('mp4') ? 'mp4' : 'webm';
-        const blob = new Blob(recordedBlobs, { type: 'video/' + type });
-        const recFileName = getDataTimeString() + '-REC.' + type;
+        // const type = recordedBlobs[0].type.includes('mp4') ? 'mp4' : 'webm';
+        // const blob = new Blob(recordedBlobs, { type: 'video/' + type });
+        const type = multiTrackrecordedBlobs[stream_id][0].type.includes('mp4') ? 'mp4' : 'webm';
+        const blob = new Blob(multiTrackrecordedBlobs[stream_id], { type: 'video/' + type });
+        
+        const recFileName = getDataTimeString() + '-REC-' + peer_name + '.' + type;
         const currentDevice = isMobileDevice ? 'MOBILE' : 'PC';
         const blobFileSize = bytesToSize(blob.size);
 
@@ -10664,7 +10712,7 @@ function showAbout() {
     Swal.fire({
         background: swBg,
         position: 'center',
-        title: '<strong>WebRTC P2P v1.3.99</strong>',
+        title: '<strong>WebRTC P2P v1.3.98</strong>',
         imageAlt: 'mirotalk-about',
         imageUrl: images.about,
         customClass: { image: 'img-about' },
